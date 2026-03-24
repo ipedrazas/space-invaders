@@ -27,14 +27,40 @@ const BULLET_HEIGHT = 10;
 
 const STARTING_LIVES = 3;
 
+// ─── Level Configuration ────────────────────────────────────────
+// Each level scales difficulty: speed, shooting, enemy count
+function getLevelConfig(level) {
+  const lvl = Math.min(level, 10);
+  return {
+    rows: Math.min(3 + Math.floor(lvl / 3), ENEMY_ROWS),  // 3,3,4,4,4,5,5,5,5,5
+    cols: Math.min(7 + Math.floor(lvl / 2), ENEMY_COLS),   // 7,7,8,8,9,9,10,10,11,11
+    baseSpeed: ENEMY_BASE_SPEED + (lvl - 1) * 0.08,        // 0.5 → 1.22
+    shootInterval: Math.max(ENEMY_SHOOT_INTERVAL - (lvl - 1) * 120, 800), // 2000 → 920
+    bulletSpeed: ENEMY_BULLET_SPEED + (lvl - 1) * 0.15,    // 2.5 → 3.85
+    startY: 60 - (lvl - 1) * 2,                            // enemies start slightly lower each level
+  };
+}
+
 // ─── Game State ──────────────────────────────────────────────────
-const STATE = { START: 0, PLAYING: 1, GAME_OVER: 2, VICTORY: 3 };
+const STATE = { START: 0, PLAYING: 1, GAME_OVER: 2, VICTORY: 3, BOSS: 4 };
 
 let gameState = STATE.START;
 let score = 0;
 let lives = STARTING_LIVES;
+let level = 1;
 let lastEnemyShot = 0;
 let lastPlayerShot = 0;
+
+// ─── Boss State ─────────────────────────────────────────────────
+let boss = null;
+let bossPhase = 0;           // 0=moving, 1=charging, 2=spread attack
+let bossPhaseTimer = 0;
+let bossBullets = [];
+const BOSS_MAX_HP = 80;
+const BOSS_WIDTH = 90;
+const BOSS_HEIGHT = 55;
+const BOSS_SPEED = 1.5;
+const BOSS_BULLET_SPEED = 3;
 
 // ─── Input ───────────────────────────────────────────────────────
 const keys = {};
@@ -109,15 +135,18 @@ let totalEnemies = 0;
 
 function createEnemyGrid() {
   enemies = [];
-  const gridW = ENEMY_COLS * (ENEMY_WIDTH + ENEMY_PAD_X) - ENEMY_PAD_X;
+  const cfg = getLevelConfig(level);
+  const rows = cfg.rows;
+  const cols = cfg.cols;
+  const gridW = cols * (ENEMY_WIDTH + ENEMY_PAD_X) - ENEMY_PAD_X;
   const startX = (W - gridW) / 2;
-  const startY = 60;
+  const startY = cfg.startY;
 
-  for (let r = 0; r < ENEMY_ROWS; r++) {
-    for (let c = 0; c < ENEMY_COLS; c++) {
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
       let type;
       if (r === 0) type = 2;         // top row — small, high value
-      else if (r < 3) type = 1;      // middle rows
+      else if (r < Math.ceil(rows / 2)) type = 1;  // middle rows
       else type = 0;                  // bottom rows
 
       enemies.push({
@@ -141,13 +170,20 @@ function aliveEnemies() {
 function updateEnemies() {
   const alive = aliveEnemies();
   if (alive.length === 0) {
-    gameState = STATE.VICTORY;
+    if (level >= 10) {
+      // Start boss fight after level 10
+      startBossFight();
+    } else {
+      // Advance to next level
+      advanceLevel();
+    }
     return;
   }
 
   // Speed scales as enemies are destroyed — the classic accidental feature
+  const cfg = getLevelConfig(level);
   const speedMultiplier = 1 + (totalEnemies - alive.length) / totalEnemies * 2;
-  const speed = ENEMY_BASE_SPEED * speedMultiplier;
+  const speed = cfg.baseSpeed * speedMultiplier;
 
   // Check if any enemy hit a wall
   let shouldDrop = false;
@@ -223,8 +259,9 @@ function updatePlayerBullets() {
 }
 
 function updateEnemyBullets() {
+  const cfg = getLevelConfig(level);
   for (let i = enemyBullets.length - 1; i >= 0; i--) {
-    enemyBullets[i].y += ENEMY_BULLET_SPEED;
+    enemyBullets[i].y += cfg.bulletSpeed;
     if (enemyBullets[i].y > H) {
       enemyBullets.splice(i, 1);
     }
@@ -235,7 +272,8 @@ function enemyShoot(now) {
   const alive = aliveEnemies();
   if (alive.length === 0) return;
 
-  const interval = ENEMY_SHOOT_INTERVAL * (alive.length / totalEnemies);
+  const cfg = getLevelConfig(level);
+  const interval = cfg.shootInterval * (alive.length / totalEnemies);
   if (now - lastEnemyShot < Math.max(interval, 400)) return;
 
   lastEnemyShot = now;
@@ -414,6 +452,8 @@ function drawHUD() {
   ctx.font = "16px monospace";
   ctx.textAlign = "left";
   ctx.fillText(`SCORE: ${score}`, 10, 25);
+  ctx.textAlign = "center";
+  ctx.fillText(gameState === STATE.BOSS ? "BOSS" : `LEVEL ${level}/10`, W / 2, 25);
   ctx.textAlign = "right";
   ctx.fillText(`LIVES: ${"▲".repeat(lives)}`, W - 10, 25);
   ctx.textAlign = "left";
@@ -488,36 +528,261 @@ function drawVictoryScreen() {
   ctx.fillStyle = "#0f0";
   ctx.font = "bold 48px monospace";
   ctx.textAlign = "center";
-  ctx.fillText("VICTORY!", W / 2, H / 2 - 30);
+  ctx.fillText("PLANET CLEARED!", W / 2, H / 2 - 50);
+
+  ctx.fillStyle = "#ffff00";
+  ctx.font = "bold 28px monospace";
+  ctx.fillText("BOSS DEFEATED!", W / 2, H / 2);
 
   ctx.fillStyle = "#fff";
   ctx.font = "22px monospace";
-  ctx.fillText(`FINAL SCORE: ${score}`, W / 2, H / 2 + 20);
+  ctx.fillText(`FINAL SCORE: ${score}`, W / 2, H / 2 + 40);
 
   ctx.font = "18px monospace";
   const blink = Math.floor(performance.now() / 500) % 2;
-  if (blink) ctx.fillText("PRESS ENTER TO PLAY AGAIN", W / 2, H / 2 + 70);
+  if (blink) ctx.fillText("PRESS ENTER TO PLAY AGAIN", W / 2, H / 2 + 90);
 
   ctx.textAlign = "left";
+}
+
+// ─── Level Advance ──────────────────────────────────────────────
+let levelTransition = false;
+let levelTransitionEnd = 0;
+
+function advanceLevel() {
+  level++;
+  levelTransition = true;
+  levelTransitionEnd = performance.now() + 2000;
+  playerBullets = [];
+  enemyBullets = [];
+  createEnemyGrid();
+  createShields();
+}
+
+function drawLevelTransition() {
+  ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.fillStyle = "#0f0";
+  ctx.font = "bold 40px monospace";
+  ctx.textAlign = "center";
+  ctx.fillText(`LEVEL ${level}`, W / 2, H / 2 - 10);
+
+  ctx.fillStyle = "#fff";
+  ctx.font = "18px monospace";
+  ctx.fillText("GET READY!", W / 2, H / 2 + 30);
+  ctx.textAlign = "left";
+}
+
+// ─── Boss ───────────────────────────────────────────────────────
+function startBossFight() {
+  gameState = STATE.BOSS;
+  playerBullets = [];
+  enemyBullets = [];
+  bossBullets = [];
+  enemies = [];
+  bossPhase = 0;
+  bossPhaseTimer = performance.now() + 3000;
+  boss = {
+    x: W / 2 - BOSS_WIDTH / 2,
+    y: 60,
+    w: BOSS_WIDTH,
+    h: BOSS_HEIGHT,
+    hp: BOSS_MAX_HP,
+    direction: 1,
+    flashUntil: 0,
+  };
+}
+
+function updateBoss(now) {
+  if (!boss) return;
+
+  // Movement — side to side
+  boss.x += BOSS_SPEED * boss.direction;
+  if (boss.x + boss.w > W - 10) boss.direction = -1;
+  if (boss.x < 10) boss.direction = 1;
+
+  // Phase transitions every 3 seconds
+  if (now > bossPhaseTimer) {
+    bossPhase = (bossPhase + 1) % 3;
+    bossPhaseTimer = now + 3000;
+  }
+
+  // Shooting based on phase
+  if (bossPhase === 0) {
+    // Aimed shot at player
+    if (Math.random() < 0.02) {
+      const cx = boss.x + boss.w / 2;
+      const cy = boss.y + boss.h;
+      const dx = (player.x + player.w / 2) - cx;
+      const dy = (player.y) - cy;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      bossBullets.push({
+        x: cx - 2, y: cy, w: 4, h: 10,
+        vx: (dx / dist) * BOSS_BULLET_SPEED,
+        vy: (dy / dist) * BOSS_BULLET_SPEED,
+      });
+    }
+  } else if (bossPhase === 1) {
+    // Spread shot — 3 bullets in a fan
+    if (Math.random() < 0.015) {
+      const cx = boss.x + boss.w / 2;
+      const cy = boss.y + boss.h;
+      for (let angle = -0.3; angle <= 0.3; angle += 0.3) {
+        bossBullets.push({
+          x: cx - 2, y: cy, w: 4, h: 10,
+          vx: Math.sin(angle) * BOSS_BULLET_SPEED,
+          vy: Math.cos(angle) * BOSS_BULLET_SPEED,
+        });
+      }
+    }
+  } else {
+    // Rapid fire — straight down from random positions
+    if (Math.random() < 0.04) {
+      const rx = boss.x + Math.random() * boss.w;
+      bossBullets.push({
+        x: rx - 2, y: boss.y + boss.h, w: 4, h: 10,
+        vx: 0, vy: BOSS_BULLET_SPEED * 1.2,
+      });
+    }
+  }
+}
+
+function updateBossBullets() {
+  for (let i = bossBullets.length - 1; i >= 0; i--) {
+    const b = bossBullets[i];
+    b.x += b.vx;
+    b.y += b.vy;
+    if (b.y > H || b.y < 0 || b.x < 0 || b.x > W) {
+      bossBullets.splice(i, 1);
+    }
+  }
+}
+
+function checkBossCollisions(now) {
+  // Player bullets → boss
+  for (let bi = playerBullets.length - 1; bi >= 0; bi--) {
+    const b = playerBullets[bi];
+    if (rectsOverlap(b, boss)) {
+      playerBullets.splice(bi, 1);
+      boss.hp--;
+      boss.flashUntil = now + 100;
+      score += 5;
+      if (boss.hp <= 0) {
+        score += 500;  // Boss kill bonus
+        boss = null;
+        gameState = STATE.VICTORY;
+        return;
+      }
+    }
+  }
+
+  // Boss bullets → shields → player
+  for (let bi = bossBullets.length - 1; bi >= 0; bi--) {
+    const b = bossBullets[bi];
+    if (bulletHitsShield(b)) {
+      bossBullets.splice(bi, 1);
+      continue;
+    }
+    if (now > player.invincibleUntil && rectsOverlap(b, player)) {
+      bossBullets.splice(bi, 1);
+      player.hit();
+      break;
+    }
+  }
+}
+
+function drawBoss(now) {
+  if (!boss) return;
+
+  const flash = boss.flashUntil > now;
+
+  // Body — large menacing shape
+  ctx.fillStyle = flash ? "#fff" : "#ff00ff";
+  ctx.fillRect(boss.x + 15, boss.y, boss.w - 30, boss.h);         // core
+  ctx.fillRect(boss.x, boss.y + 10, boss.w, boss.h - 20);         // wide middle
+
+  // Wings/arms
+  ctx.fillStyle = flash ? "#fff" : "#cc00cc";
+  ctx.fillRect(boss.x - 8, boss.y + 15, 12, 25);                  // left arm
+  ctx.fillRect(boss.x + boss.w - 4, boss.y + 15, 12, 25);         // right arm
+
+  // Crown spikes
+  ctx.fillStyle = flash ? "#fff" : "#ff44ff";
+  ctx.fillRect(boss.x + 20, boss.y - 8, 6, 10);
+  ctx.fillRect(boss.x + boss.w / 2 - 3, boss.y - 12, 6, 14);
+  ctx.fillRect(boss.x + boss.w - 26, boss.y - 8, 6, 10);
+
+  // Eyes — large and red
+  ctx.fillStyle = flash ? "#fff" : "#f00";
+  ctx.fillRect(boss.x + 22, boss.y + 18, 10, 8);
+  ctx.fillRect(boss.x + boss.w - 32, boss.y + 18, 10, 8);
+
+  // Eye pupils
+  ctx.fillStyle = "#000";
+  ctx.fillRect(boss.x + 26, boss.y + 20, 4, 4);
+  ctx.fillRect(boss.x + boss.w - 28, boss.y + 20, 4, 4);
+
+  // Mouth
+  ctx.fillStyle = flash ? "#fff" : "#f00";
+  ctx.fillRect(boss.x + 30, boss.y + 35, boss.w - 60, 6);
+  // Teeth
+  ctx.fillStyle = "#fff";
+  for (let t = boss.x + 33; t < boss.x + boss.w - 33; t += 8) {
+    ctx.fillRect(t, boss.y + 35, 4, 3);
+  }
+
+  // HP bar
+  const barW = 120;
+  const barH = 8;
+  const barX = W / 2 - barW / 2;
+  const barY = 44;
+  const hpPct = boss.hp / BOSS_MAX_HP;
+  ctx.fillStyle = "#333";
+  ctx.fillRect(barX, barY, barW, barH);
+  ctx.fillStyle = hpPct > 0.3 ? "#f0f" : "#f00";
+  ctx.fillRect(barX, barY, barW * hpPct, barH);
+  ctx.strokeStyle = "#fff";
+  ctx.strokeRect(barX, barY, barW, barH);
+
+  // Boss name
+  ctx.fillStyle = "#ff44ff";
+  ctx.font = "12px monospace";
+  ctx.textAlign = "center";
+  ctx.fillText("OVERLORD", W / 2, barY - 4);
+  ctx.textAlign = "left";
+}
+
+function drawBossBullets() {
+  ctx.fillStyle = "#f0f";
+  for (const b of bossBullets) {
+    ctx.fillRect(b.x, b.y, b.w, b.h);
+  }
 }
 
 // ─── Game Lifecycle ──────────────────────────────────────────────
 function startGame() {
   gameState = STATE.PLAYING;
   score = 0;
+  level = 1;
   lives = STARTING_LIVES;
   player.x = W / 2 - PLAYER_WIDTH / 2;
   player.invincibleUntil = 0;
   playerBullets = [];
   enemyBullets = [];
+  bossBullets = [];
+  boss = null;
   lastEnemyShot = 0;
   lastPlayerShot = 0;
+  levelTransition = false;
   createEnemyGrid();
   createShields();
 }
 
 function resetGame() {
   gameState = STATE.START;
+  boss = null;
+  bossBullets = [];
 }
 
 // ─── Main Game Loop (60 FPS) ─────────────────────────────────────
@@ -533,6 +798,17 @@ function gameLoop(timestamp) {
       break;
 
     case STATE.PLAYING:
+      // Level transition overlay
+      if (levelTransition && timestamp < levelTransitionEnd) {
+        drawHUD();
+        player.draw();
+        drawEnemies();
+        drawShields();
+        drawLevelTransition();
+        break;
+      }
+      if (levelTransition) levelTransition = false;
+
       // Update
       player.update();
       player.shoot(timestamp);
@@ -550,12 +826,32 @@ function gameLoop(timestamp) {
       drawBullets();
       break;
 
+    case STATE.BOSS:
+      // Update
+      player.update();
+      player.shoot(timestamp);
+      updateBoss(timestamp);
+      updatePlayerBullets();
+      updateBossBullets();
+      if (boss) checkBossCollisions(timestamp);
+
+      // Draw
+      drawHUD();
+      player.draw();
+      drawShields();
+      drawBoss(timestamp);
+      drawBullets();
+      drawBossBullets();
+      break;
+
     case STATE.GAME_OVER:
       drawHUD();
       player.draw();
       drawEnemies();
       drawShields();
       drawBullets();
+      if (boss) drawBoss(timestamp);
+      drawBossBullets();
       drawGameOverScreen();
       break;
 
